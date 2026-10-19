@@ -45,6 +45,11 @@ STYLE = {
     "white_cap": 0.90,         # приглушені світлі 0.8..1
     "darken": 0.12,            # затемнення 0..1
     "grain_opacity": 0.55,     # сила зерна 0..1
+    # --- режим «по черзі»: абзаци (через порожній рядок) з'являються по одному ---
+    "seq_words_per_sec": 3.0,  # швидкість читання
+    "seq_min": 2.5,            # с — мінімум на один пункт
+    "seq_pad": 0.8,            # с — запас на кожен пункт
+    "seq_last_extra": 1.5,     # с — фінальний пункт стоїть довше
     "fade_in": 0,              # 0 = текст видно з першого кадру
     "fade_out": 0,             # 0 = текст видно до останнього кадру
 }
@@ -57,6 +62,10 @@ def reading_duration(text: str) -> float:
 
 
 SHORT_WORDS = {"і", "й", "в", "у", "з", "а", "о", "я", "та", "не", "до", "на", "за", "по", "від", "із", "зі"}
+
+
+# слова, на яких краще не закінчувати рядок (вони тягнуть за собою продовження)
+WEAK_END = {"як", "що", "коли", "бо", "де", "щоб", "ніж", "якщо", "мій", "моя", "моє", "мої", "моїм", "твій", "твоя", "твоїм"}
 
 
 def wrap_line(line: str, font, max_px: float) -> list:
@@ -74,27 +83,34 @@ def wrap_line(line: str, font, max_px: float) -> list:
             w = w + " " + words[i]
         units.append(w)
         i += 1
-    total = font.getlength(" ".join(units))
-    n = 2
-    while n <= len(units):
-        target = total / n
-        out, cur = [], ""
-        for u in units:
-            cand = (cur + " " + u).strip()
-            after_comma = cur.endswith((",", "—", ":")) and font.getlength(cur) >= target * 0.55
-            if cur and (font.getlength(cand) > target * 1.15 or after_comma) and len(out) < n - 1:
-                out.append(cur)
-                cur = u
-            else:
-                cur = cand
-        out.append(cur)
-        if max(font.getlength(x) for x in out) <= max_px:
-            return out
-        n += 1
+    # мінімальна кількість рядків, а серед варіантів — найрівніші за шириною (переважно розрив після коми)
+    m = len(units)
+    width = lambda a, b: font.getlength(" ".join(units[a:b]))
+    for n in range(2, m + 1):
+        best = None
+        def parts(start, k):
+            if k == 1:
+                yield [(start, m)]
+                return
+            for cut in range(start + 1, m - k + 2):
+                for rest in parts(cut, k - 1):
+                    yield [(start, cut)] + rest
+        for split in parts(0, n):
+            ws = [width(a, b) for a, b in split]
+            if max(ws) > max_px:
+                continue
+            commas = sum(1 for a, b in split[:-1] if units[b - 1].endswith((",", "—", ":")))
+            weak = sum(1 for a, b in split[:-1] if units[b - 1].lower() in WEAK_END)
+            score = (max(ws) - min(ws)) - commas * 80 + weak * 80
+            if best is None or score < best[0]:
+                best = (score, split)
+        if best:
+            return [" ".join(units[a:b]) for a, b in best[1]]
     return units
 
 
-def render_text_png(text: str, font_path: str, out_png: str) -> None:
+def render_text_png(text: str, font_path: str, out_png: str) -> bool:
+    """Малює текстовий блок у PNG. Повертає True, якщо текст вмістився без зменшення шрифту."""
     raw_lines = text.strip("\n").split("\n")
     max_w = int(W * STYLE["box_width"])
     max_h = H - STYLE["safe_top"] - STYLE["safe_bottom"]
@@ -103,7 +119,7 @@ def render_text_png(text: str, font_path: str, out_png: str) -> None:
     size = STYLE["font_size_max"]
     while True:
         font = ImageFont.truetype(font_path, size)
-        line_px = min(font.getlength(STYLE["line_chars"]) * 1.05, max_w)
+        line_px = min(font.getlength(STYLE["line_chars"]) * 1.12, max_w)
         lines = []
         for rl in raw_lines:
             lines += wrap_line(rl, font, line_px) if rl.strip() else [""]
@@ -135,6 +151,7 @@ def render_text_png(text: str, font_path: str, out_png: str) -> None:
         img = img.filter(ImageFilter.GaussianBlur(6))
     draw_lines(img, 0, STYLE["text_color"])
     img.save(out_png)
+    return size == STYLE["font_size_max"]
 
 
 def sepia_darken_matrix(s: float, d: float) -> str:
@@ -150,11 +167,44 @@ def sepia_darken_matrix(s: float, d: float) -> str:
     return ":".join(f"{n}={v}" for n, v in zip(names, m))
 
 
-def render(video: str, text: str, out: str, grain: str, font: str, duration: float | None) -> float:
-    dur = duration or reading_duration(text)
+def paragraphs(text: str) -> list:
+    out, cur = [], []
+    for line in text.strip("\n").split("\n"):
+        if line.strip():
+            cur.append(line)
+        elif cur:
+            out.append("\n".join(cur))
+            cur = []
+    if cur:
+        out.append("\n".join(cur))
+    return out
+
+
+def render(video: str, text: str, out: str, grain: str, font: str,
+           duration: float | None, mode: str = "auto") -> float:
+    """mode: block — весь текст одним блоком; sequence — абзаци по черзі;
+    auto — блок, якщо вміщається без зменшення шрифту, інакше по черзі."""
     with tempfile.TemporaryDirectory() as tmp:
-        png = os.path.join(tmp, "text.png")
-        render_text_png(text, font, png)
+        layers = []  # (png, start, end)
+        block_png = os.path.join(tmp, "text.png")
+        fits = render_text_png(text, font, block_png)
+        paras = paragraphs(text)
+        sequence = mode == "sequence" or (mode == "auto" and not fits and len(paras) > 1)
+
+        if sequence:
+            t = 0.0
+            for i, para in enumerate(paras):
+                png = os.path.join(tmp, f"p{i}.png")
+                render_text_png(para, font, png)
+                d = max(STYLE["seq_min"], len(para.split()) / STYLE["seq_words_per_sec"] + STYLE["seq_pad"])
+                if i == len(paras) - 1:
+                    d += STYLE["seq_last_extra"]
+                layers.append((png, round(t, 2), round(t + d, 2)))
+                t += d
+            dur = round(t, 1)
+        else:
+            dur = duration or reading_duration(text)
+            layers.append((block_png, 0, dur))
 
         fades = []
         if STYLE["fade_in"]:
@@ -162,6 +212,7 @@ def render(video: str, text: str, out: str, grain: str, font: str, duration: flo
         if STYLE["fade_out"]:
             fades.append(f"fade=t=out:st={max(0.0, dur - STYLE['fade_out'])}:d={STYLE['fade_out']}:alpha=1")
         txt_chain = ",".join(["format=rgba"] + fades)
+
         filt = (
             f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},"
             f"scale={STYLE['vhs_res']}:-2:flags=area,scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['blur']},"
@@ -170,21 +221,25 @@ def render(video: str, text: str, out: str, grain: str, font: str, duration: flo
             f"eq=saturation={STYLE['saturation']},"
             f"curves=all='0/{STYLE['black_lift']} 1/{STYLE['white_cap']}',format=gbrp[bg];"
             f"[1:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},format=gbrp[gr];"
-            f"[bg][gr]blend=all_mode=overlay:all_opacity={STYLE['grain_opacity']},format=yuv420p[base];"
-            f"[2:v]{txt_chain}[txt];"
-            f"[base][txt]overlay=0:0:format=auto,format=yuv420p[v]"
+            f"[bg][gr]blend=all_mode=overlay:all_opacity={STYLE['grain_opacity']},format=yuv420p[b0]"
         )
-        cmd = [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-stream_loop", "-1", "-i", video,
-            "-stream_loop", "-1", "-i", grain,
-            "-loop", "1", "-framerate", str(FPS), "-i", png,
-            "-filter_complex", filt, "-map", "[v]",
-            "-t", str(dur), "-an",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "21",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            out,
-        ]
+        inputs = ["-stream_loop", "-1", "-i", video, "-stream_loop", "-1", "-i", grain]
+        prev = "b0"
+        for k, (png, a, b) in enumerate(layers):
+            inputs += ["-loop", "1", "-framerate", str(FPS), "-i", png]
+            chain = txt_chain if not sequence else "format=rgba"
+            filt += f";[{k + 2}:v]{chain}[t{k}]"
+            enable = "" if not sequence else f":enable='between(t,{a},{b})'"
+            filt += f";[{prev}][t{k}]overlay=0:0:format=auto{enable}[b{k + 1}]"
+            prev = f"b{k + 1}"
+        filt += f";[{prev}]format=yuv420p[v]"
+
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", *inputs,
+               "-filter_complex", filt, "-map", "[v]",
+               "-t", str(dur), "-an",
+               "-c:v", "libx264", "-preset", "medium", "-crf", "21",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+               out]
         subprocess.run(cmd, check=True)
     return dur
 
@@ -198,8 +253,9 @@ if __name__ == "__main__":
     p.add_argument("--grain", default=os.path.join(here, "pgr_film_grain_overlay.mp4"))
     p.add_argument("--font", default=os.path.join(here, "Roboto-Medium.woff"))
     p.add_argument("--duration", type=float, default=None, help="тривалість, с (за замовч. — під довжину тексту)")
+    p.add_argument("--mode", default="auto", choices=["auto", "block", "sequence"])
     a = p.parse_args()
     with open(a.text, encoding="utf-8") as f:
         txt = f.read()
-    d = render(a.video, txt, a.out, a.grain, a.font, a.duration)
+    d = render(a.video, txt, a.out, a.grain, a.font, a.duration, a.mode)
     print(f"OK: {a.out} ({d} c)")
