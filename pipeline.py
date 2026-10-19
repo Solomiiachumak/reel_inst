@@ -150,7 +150,8 @@ def main() -> None:
             "author_url": video.get("user", {}).get("url", ""),
         })
 
-    dur = render(bg, text, a.out, grain_path(), font_path(), None)
+    mode = os.environ.get("REEL_MODE", "").strip() or "auto"
+    dur = render(bg, text, a.out, grain_path(), font_path(), None, mode)
     meta["duration"] = dur
 
     if not a.video and os.path.exists(bg) and bg.endswith("bg.mp4"):
