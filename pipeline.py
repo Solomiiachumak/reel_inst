@@ -91,6 +91,13 @@ def grain_path() -> str:
     return path
 
 
+def drive_id(value: str) -> str:
+    """Приймає ID файлу або будь-яке посилання Google Drive на нього."""
+    import re
+    m = re.search(r"/d/([\w-]{20,})", value) or re.search(r"id=([\w-]{20,})", value)
+    return m.group(1) if m else value
+
+
 def download(url: str, path: str) -> None:
     with requests.get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
@@ -115,9 +122,21 @@ def main() -> None:
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     meta = {"keywords": keywords}
 
+    drive_video = os.environ.get("REEL_VIDEO", "").strip()
+
     if a.video:
         bg = a.video
         meta.update({"pexels_id": "", "author": "local test"})
+    elif drive_video:
+        # відео з бібліотеки на Google Drive (файл має бути доступний «за посиланням»)
+        fid = drive_id(drive_video)
+        bg = os.path.join(os.path.dirname(os.path.abspath(a.out)), "bg.mp4")
+        download(f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t", bg)
+        with open(bg, "rb") as fh:
+            head = fh.read(512).lower()
+        if b"<html" in head or b"<!doctype" in head:
+            sys.exit("Google Drive не віддав відео: відкрийте доступ до файлу/папки «Усі, хто має посилання»")
+        meta.update({"video_id": fid, "source": "drive"})
     else:
         key = os.environ["PEXELS_API_KEY"]
         video, f = pick_video(keywords, exclude, key)
@@ -133,7 +152,7 @@ def main() -> None:
     dur = render(bg, text, a.out, grain_path(), font_path(), None)
     meta["duration"] = dur
 
-    if not a.video and os.path.exists(bg):
+    if not a.video and os.path.exists(bg) and bg.endswith("bg.mp4"):
         os.remove(bg)  # у артефакт кладемо лише готовий рілс
     with open(a.meta, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, ensure_ascii=False)
