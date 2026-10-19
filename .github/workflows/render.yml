@@ -1,0 +1,54 @@
+name: render-reel
+run-name: "Рілс, рядок ${{ inputs.row }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      row:
+        description: "Номер рядка у вкладці «Рілси авто»"
+        required: true
+        type: string
+      text:
+        description: "Текст на екрані (переноси рядків зберігаються)"
+        required: true
+        type: string
+      keywords:
+        description: "Ключові слова для пошуку відео на Pexels (англ.)"
+        required: true
+        type: string
+      exclude:
+        description: "Pexels ID, які вже використовували (через кому)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg + Roboto
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-roboto
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Render reel
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          REEL_TEXT: ${{ inputs.text }}
+          REEL_KEYWORDS: ${{ inputs.keywords }}
+          REEL_EXCLUDE: ${{ inputs.exclude }}
+        run: python pipeline.py --out out/reel.mp4 --meta out/meta.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reel-row-${{ inputs.row }}-${{ github.run_id }}
+          path: out/
+          retention-days: 3
