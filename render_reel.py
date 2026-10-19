@@ -24,18 +24,27 @@ FPS = 30
 
 # --- Стиль (аналог шаблону PGR Reel A) ---
 STYLE = {
-    "font_size_max": 37,       # px  (~3.4 vmin)
-    "font_size_min": 22,       # px  (~2 vmin) — нижче не зменшуємо
-    "line_height": 1.45,       # міжрядковий інтервал
-    "box_width": 0.55,         # макс. ширина текстового блоку (частка кадру)
+    "font_size_max": 30,       # px — як у макеті (Roboto 30)
+    "font_size_min": 24,       # px — нижче не зменшуємо
+    "line_height": 1.27,       # крок рядка (стандартний для Roboto)
+    "blank_line": 0.8,         # висота порожнього рядка між абзацами (частка рядка)
+    "box_width": 0.6,          # абсолютний максимум ширини блоку (частка кадру)
+    "line_chars": "більше не воюєш",  # еталон найширшого рядка: довші рядки переносяться автоматично
     "safe_top": 250,           # px — зверху інтерфейс Instagram
     "safe_bottom": 420,        # px — знизу підпис і кнопки
-    "center_y": 0.47,          # центр тексту по висоті
+    "center_y": 0.5,           # центр тексту по висоті
     "text_color": (255, 255, 255, 255),
-    "shadow_alpha": 90,        # 0 = без тіні
-    "sepia": 0.20,             # сила сепії 0..1
-    "darken": 0.25,            # затемнення 0..1
-    "grain_opacity": 0.60,     # сила зерна 0..1
+    "shadow_alpha": 0,         # 0 = без тіні
+    # --- VHS-обробка відео ---
+    "vhs_res": 360,            # ширина «плівки» перед розтягуванням (менше = м'якше)
+    "blur": 1.2,               # додаткова м'якість
+    "chroma_shift": 3,         # px — розбіжність кольорів по краях
+    "sepia": 0.60,             # сила сепії 0..1
+    "saturation": 0.85,
+    "black_lift": 0.10,        # «вицвілі» тіні 0..0.2
+    "white_cap": 0.90,         # приглушені світлі 0.8..1
+    "darken": 0.12,            # затемнення 0..1
+    "grain_opacity": 0.55,     # сила зерна 0..1
     "fade_in": 0,              # 0 = текст видно з першого кадру
     "fade_out": 0,             # 0 = текст видно до останнього кадру
 }
@@ -47,8 +56,46 @@ def reading_duration(text: str) -> float:
     return round(min(30.0, max(8.0, words / 2.5 + 3.0)), 1)
 
 
+SHORT_WORDS = {"і", "й", "в", "у", "з", "а", "о", "я", "та", "не", "до", "на", "за", "по", "від", "із", "зі"}
+
+
+def wrap_line(line: str, font, max_px: float) -> list:
+    """Розбиває задовгий рядок на рівні за шириною частини.
+    Короткі слова (і, в, з, не...) не лишаються в кінці рядка — переносяться разом із наступним."""
+    if font.getlength(line) <= max_px:
+        return [line]
+    words = line.split()
+    # склеюємо короткі службові слова з наступним словом
+    units, i = [], 0
+    while i < len(words):
+        w = words[i]
+        while w.split()[-1].lower().strip("«»,.") in SHORT_WORDS and not w.endswith(",") and i + 1 < len(words):
+            i += 1
+            w = w + " " + words[i]
+        units.append(w)
+        i += 1
+    total = font.getlength(" ".join(units))
+    n = 2
+    while n <= len(units):
+        target = total / n
+        out, cur = [], ""
+        for u in units:
+            cand = (cur + " " + u).strip()
+            after_comma = cur.endswith((",", "—", ":")) and font.getlength(cur) >= target * 0.55
+            if cur and (font.getlength(cand) > target * 1.15 or after_comma) and len(out) < n - 1:
+                out.append(cur)
+                cur = u
+            else:
+                cur = cand
+        out.append(cur)
+        if max(font.getlength(x) for x in out) <= max_px:
+            return out
+        n += 1
+    return units
+
+
 def render_text_png(text: str, font_path: str, out_png: str) -> None:
-    lines = text.strip("\n").split("\n")
+    raw_lines = text.strip("\n").split("\n")
     max_w = int(W * STYLE["box_width"])
     max_h = H - STYLE["safe_top"] - STYLE["safe_bottom"]
 
@@ -56,47 +103,37 @@ def render_text_png(text: str, font_path: str, out_png: str) -> None:
     size = STYLE["font_size_max"]
     while True:
         font = ImageFont.truetype(font_path, size)
-        lh = int(size * STYLE["line_height"])
+        line_px = min(font.getlength(STYLE["line_chars"]) * 1.05, max_w)
+        lines = []
+        for rl in raw_lines:
+            lines += wrap_line(rl, font, line_px) if rl.strip() else [""]
+        lh = round(size * STYLE["line_height"])
+        gap = round(lh * STYLE["blank_line"])
+        ys, y = [], 0
+        for l in lines:
+            ys.append(y)
+            y += lh if l.strip() else gap
+        block_h = y
         widths = [font.getlength(l) for l in lines]
-        block_h = lh * len(lines)
         if (max(widths or [0]) <= max_w and block_h <= max_h) or size <= STYLE["font_size_min"]:
             break
         size -= 1
 
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
     top = int(H * STYLE["center_y"] - block_h / 2)
     top = max(STYLE["safe_top"], min(top, H - STYLE["safe_bottom"] - block_h))
 
-    for i, line in enumerate(lines):
-        if not line.strip():
-            continue
-        w = font.getlength(line)
-        x = (W - w) / 2
-        y = top + i * lh
-        if STYLE["shadow_alpha"]:
-            draw.text((x, y + 2), line, font=font, fill=(0, 0, 0, STYLE["shadow_alpha"]))
-        draw.text((x, y), line, font=font, fill=STYLE["text_color"])
+    def draw_lines(layer, dy, fill):
+        d = ImageDraw.Draw(layer)
+        for line, y0 in zip(lines, ys):
+            if line.strip():
+                d.text(((W - font.getlength(line)) / 2, top + y0 + dy), line, font=font, fill=fill)
 
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     if STYLE["shadow_alpha"]:
-        # легке розмиття лише тіні: малюємо тінь окремим шаром
         from PIL import ImageFilter
-        shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shadow)
-        for i, line in enumerate(lines):
-            if line.strip():
-                w = font.getlength(line)
-                sd.text(((W - w) / 2, top + i * lh + 2), line, font=font,
-                        fill=(0, 0, 0, STYLE["shadow_alpha"]))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(6))
-        clean = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        cd = ImageDraw.Draw(clean)
-        for i, line in enumerate(lines):
-            if line.strip():
-                w = font.getlength(line)
-                cd.text(((W - w) / 2, top + i * lh), line, font=font, fill=STYLE["text_color"])
-        img = Image.alpha_composite(shadow, clean)
-
+        draw_lines(img, 2, (0, 0, 0, STYLE["shadow_alpha"]))
+        img = img.filter(ImageFilter.GaussianBlur(6))
+    draw_lines(img, 0, STYLE["text_color"])
     img.save(out_png)
 
 
@@ -127,7 +164,11 @@ def render(video: str, text: str, out: str, grain: str, font: str, duration: flo
         txt_chain = ",".join(["format=rgba"] + fades)
         filt = (
             f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},"
-            f"colorchannelmixer={sepia_darken_matrix(STYLE['sepia'], STYLE['darken'])},format=gbrp[bg];"
+            f"scale={STYLE['vhs_res']}:-2:flags=area,scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['blur']},"
+            f"chromashift=cbh={STYLE['chroma_shift']}:crh=-{STYLE['chroma_shift']},"
+            f"colorchannelmixer={sepia_darken_matrix(STYLE['sepia'], STYLE['darken'])},"
+            f"eq=saturation={STYLE['saturation']},"
+            f"curves=all='0/{STYLE['black_lift']} 1/{STYLE['white_cap']}',format=gbrp[bg];"
             f"[1:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},format=gbrp[gr];"
             f"[bg][gr]blend=all_mode=overlay:all_opacity={STYLE['grain_opacity']},format=yuv420p[base];"
             f"[2:v]{txt_chain}[txt];"
