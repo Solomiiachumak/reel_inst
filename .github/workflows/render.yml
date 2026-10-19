@@ -12,10 +12,16 @@ on:
         description: "Текст на екрані (переноси рядків зберігаються)"
         required: true
         type: string
+      video:
+        description: "Відео з Google Drive: посилання або ID файлу (якщо порожньо — пошук на Pexels)"
+        required: false
+        type: string
+        default: ""
       keywords:
         description: "Ключові слова для пошуку відео на Pexels (англ.)"
-        required: true
+        required: false
         type: string
+        default: ""
       exclude:
         description: "Pexels ID, які вже використовували (через кому)"
         required: false
@@ -44,6 +50,7 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           REEL_TEXT: ${{ inputs.text }}
           REEL_KEYWORDS: ${{ inputs.keywords }}
+          REEL_VIDEO: ${{ inputs.video }}
           REEL_EXCLUDE: ${{ inputs.exclude }}
         run: python pipeline.py --out out/reel.mp4 --meta out/meta.json
 
