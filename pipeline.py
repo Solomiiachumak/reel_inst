@@ -113,7 +113,8 @@ def main() -> None:
     p.add_argument("--video", help="локальне відео замість пошуку на Pexels (для тесту)")
     a = p.parse_args()
 
-    text = os.environ.get("REEL_TEXT", "").replace("\r\n", "\n").strip()
+    # для ручного запуску з GitHub: «\n» у полі тексту = новий рядок
+    text = os.environ.get("REEL_TEXT", "").replace("\r\n", "\n").replace("\\n", "\n").strip()
     if not text:
         sys.exit("Порожній текст (REEL_TEXT)")
     keywords = os.environ.get("REEL_KEYWORDS", "").strip() or "nature film"
