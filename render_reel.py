@@ -3,9 +3,9 @@
 PGR reel renderer — власна заміна Creatomate.
 
 Збирає вертикальний рілс 1080x1920:
-  фонове відео (cover) + легка сепія + затемнення
-  + плівкове зерно (blend overlay)
-  + текстовий блок по центру (Roboto Medium), що проявляється й зникає.
+  фонове відео (cover) + плівкова обробка (вицвіле, молочні тіні, ореол, віньєтка)
+  + кольорове плівкове зерно (генерується ffmpeg, файл зерна не потрібен)
+  + текст по центру (Roboto Medium): блоком або абзацами по черзі.
 
 Приклад:
   python3 render_reel.py --video bg.mp4 --text text.txt --out reel.mp4
@@ -35,16 +35,22 @@ STYLE = {
     "center_y": 0.5,           # центр тексту по висоті
     "text_color": (255, 255, 255, 255),
     "shadow_alpha": 0,         # 0 = без тіні
-    # --- VHS-обробка відео ---
-    "vhs_res": 360,            # ширина «плівки» перед розтягуванням (менше = м'якше)
-    "blur": 1.2,               # додаткова м'якість
-    "chroma_shift": 3,         # px — розбіжність кольорів по краях
-    "sepia": 0.60,             # сила сепії 0..1
-    "saturation": 0.85,
-    "black_lift": 0.10,        # «вицвілі» тіні 0..0.2
-    "white_cap": 0.90,         # приглушені світлі 0.8..1
-    "darken": 0.12,            # затемнення 0..1
-    "grain_opacity": 0.55,     # сила зерна 0..1
+    # --- плівкова обробка (погоджено 20.10.2026 за референсом 1-4: вицвіло, молочні тіні, ореол, кольорове зерно) ---
+    "film_res": 400,           # ширина «плівки» перед розтягуванням (менше = м'якше)
+    "blur": 1.0,               # додаткова м'якість
+    "shadow_red": 0.01,        # тонування тіней (червоний)
+    "high_blue": 0.01,         # тонування світла (синій)
+    "saturation": 1.15,        # насиченість (після кривої кадр і так вицвітає)
+    "curve": "0/0.15 0.25/0.29 0.5/0.45 0.75/0.57 1/0.68",  # підняті чорні, притиснуті білі
+    "vignette": "PI/6",        # віньєтка (кут; більше = сильніше)
+    "bloom_threshold": 0.4,    # з якої яскравості світиться ореол
+    "bloom_radius": 30,
+    "bloom": 0.4,              # сила ореолу 0..1
+    "grain_size": 2.35,        # розмір зерна (1 = піксель)
+    "grain_strength": 85,      # амплітуда шуму
+    "grain_soft": 0.55,        # м'якість зернин
+    "grain_opacity": 0.85,     # сила зерна 0..1 (зерно кольорове, мерехтить)
+    "max_bitrate": "4M",
     # --- режим «по черзі»: абзаци (через порожній рядок) з'являються по одному ---
     "seq_words_per_sec": 3.0,  # швидкість читання
     "seq_min": 2.5,            # с — мінімум на один пункт
@@ -213,17 +219,23 @@ def render(video: str, text: str, out: str, grain: str, font: str,
             fades.append(f"fade=t=out:st={max(0.0, dur - STYLE['fade_out'])}:d={STYLE['fade_out']}:alpha=1")
         txt_chain = ",".join(["format=rgba"] + fades)
 
+        gw = int(W / STYLE["grain_size"]) // 2 * 2
+        gh = int(H / STYLE["grain_size"]) // 2 * 2
         filt = (
             f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},"
-            f"scale={STYLE['vhs_res']}:-2:flags=area,scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['blur']},"
-            f"chromashift=cbh={STYLE['chroma_shift']}:crh=-{STYLE['chroma_shift']},"
-            f"colorchannelmixer={sepia_darken_matrix(STYLE['sepia'], STYLE['darken'])},"
-            f"eq=saturation={STYLE['saturation']},"
-            f"curves=all='0/{STYLE['black_lift']} 1/{STYLE['white_cap']}',format=gbrp[bg];"
-            f"[1:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},format=gbrp[gr];"
+            f"scale={STYLE['film_res']}:-2:flags=area,scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['blur']},"
+            f"colorbalance=rs={STYLE['shadow_red']}:bh={STYLE['high_blue']},"
+            f"eq=saturation={STYLE['saturation']},vignette=angle={STYLE['vignette']},"
+            f"curves=all='{STYLE['curve']}',"
+            f"split[a][b];[b]scale={W // 4}:{H // 4}:flags=area,curves=all='0/0 {STYLE['bloom_threshold']}/0 1/1',"
+            f"gblur=sigma={STYLE['bloom_radius'] / 4},scale={W}:{H}:flags=bicubic[gl];"
+            f"[a][gl]blend=all_mode=screen:all_opacity={STYLE['bloom']},format=gbrp[bg];"
+            f"[1:v]format=gbrp,noise=alls={STYLE['grain_strength']}:allf=t+u,"
+            f"scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['grain_soft']},format=gbrp[gr];"
             f"[bg][gr]blend=all_mode=overlay:all_opacity={STYLE['grain_opacity']},format=yuv420p[b0]"
         )
-        inputs = ["-stream_loop", "-1", "-i", video, "-stream_loop", "-1", "-i", grain]
+        inputs = ["-stream_loop", "-1", "-i", video,
+                  "-f", "lavfi", "-i", f"color=c=0x808080:s={gw}x{gh}:r={FPS}"]
         prev = "b0"
         for k, (png, a, b) in enumerate(layers):
             inputs += ["-loop", "1", "-framerate", str(FPS), "-i", png]
@@ -238,6 +250,7 @@ def render(video: str, text: str, out: str, grain: str, font: str,
                "-filter_complex", filt, "-map", "[v]",
                "-t", str(dur), "-an",
                "-c:v", "libx264", "-preset", "medium", "-crf", "21",
+               "-maxrate", STYLE["max_bitrate"], "-bufsize", "8M",
                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                out]
         subprocess.run(cmd, check=True)
