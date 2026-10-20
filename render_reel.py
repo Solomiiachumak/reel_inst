@@ -36,8 +36,14 @@ STYLE = {
     "text_color": (255, 255, 255, 255),
     "shadow_alpha": 0,         # 0 = без тіні
     # --- плівкова обробка (погоджено 20.10.2026 за референсом 1-4: вицвіло, молочні тіні, ореол, кольорове зерно) ---
-    "film_res": 400,           # ширина «плівки» перед розтягуванням (менше = м'якше)
+    "film_res": 200,           # ширина «плівки» перед розтягуванням (менше = м'якше, як VHS)
     "blur": 1.0,               # додаткова м'якість
+    "vhs_luma_smear": 3,       # горизонтальне розмиття яскравості (VHS)
+    "vhs_chroma_smear": 12,    # колір «тече» по горизонталі
+    "vhs_chroma_shift": 5,     # px — зсув кольору
+    "streaks": 0.5,            # горизонтальні смуги від світлих ділянок 0..1
+    "warm": 0.06,              # тепло-коричневий зсув (прибирає «цифровий» синій)
+    "vhs_saturation": 0.6,     # фінальне приглушення кольорів
     "shadow_red": 0.01,        # тонування тіней (червоний)
     "high_blue": 0.01,         # тонування світла (синій)
     "saturation": 1.15,        # насиченість (після кривої кадр і так вицвітає)
@@ -219,6 +225,7 @@ def render(video: str, text: str, out: str, grain: str, font: str,
             fades.append(f"fade=t=out:st={max(0.0, dur - STYLE['fade_out'])}:d={STYLE['fade_out']}:alpha=1")
         txt_chain = ",".join(["format=rgba"] + fades)
 
+        wm = STYLE["warm"]
         gw = int(W / STYLE["grain_size"]) // 2 * 2
         gh = int(H / STYLE["grain_size"]) // 2 * 2
         filt = (
@@ -229,7 +236,16 @@ def render(video: str, text: str, out: str, grain: str, font: str,
             f"curves=all='{STYLE['curve']}',"
             f"split[a][b];[b]scale={W // 4}:{H // 4}:flags=area,curves=all='0/0 {STYLE['bloom_threshold']}/0 1/1',"
             f"gblur=sigma={STYLE['bloom_radius'] / 4},scale={W}:{H}:flags=bicubic[gl];"
-            f"[a][gl]blend=all_mode=screen:all_opacity={STYLE['bloom']},format=gbrp[bg];"
+            f"[a][gl]blend=all_mode=screen:all_opacity={STYLE['bloom']},"
+            # --- VHS: розмиття по горизонталі, колір «тече», смуги від світла, тепло-коричневий тон ---
+            f"format=yuv444p,gblur=sigma={STYLE['vhs_luma_smear']}:sigmaV=0.6:planes=1,"
+            f"gblur=sigma={STYLE['vhs_chroma_smear']}:sigmaV=1.5:planes=6,"
+            f"chromashift=cbh={STYLE['vhs_chroma_shift']}:crh=-{STYLE['vhs_chroma_shift']},format=gbrp,"
+            f"split[c][d];[d]scale={W // 4}:{H // 4},curves=all='0/0 0.45/0 1/1',"
+            f"gblur=sigma=14:sigmaV=0.8,scale={W}:{H}[sm];"
+            f"[c][sm]blend=all_mode=screen:all_opacity={STYLE['streaks']},"
+            f"colorbalance=rs={wm}:gs={wm / 2}:bs=-{wm}:rm={wm}:gm={wm / 2}:bm=-{wm}:rh={wm}:gh={wm / 3}:bh=-{wm},"
+            f"eq=saturation={STYLE['vhs_saturation']},format=gbrp[bg];"
             f"[1:v]format=gbrp,noise=alls={STYLE['grain_strength']}:allf=t+u,"
             f"scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['grain_soft']},format=gbrp[gr];"
             f"[bg][gr]blend=all_mode=overlay:all_opacity={STYLE['grain_opacity']},format=yuv420p[b0]"
