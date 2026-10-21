@@ -70,7 +70,7 @@ STYLE = {
     "list_line_px": 720,       # максимальна ширина рядка, px (~35 знаків)
     "list_item_sec": 3.0,      # с на кожен пункт
     "list_last_sec": 5.0,      # с на фінальний пункт
-    "list_end_fade": 1.2,      # с — в кінці кадр плавно йде в однотонний фон
+    "list_end_fade": 0,        # с — затухання в кінці (0 = без затухання)
     "list_end_color": "0x9a9080",
     "list_positions": [0.25, 0.37, 0.5, 0.62, 0.72],  # можливі центри тексту по висоті
 }
@@ -281,7 +281,8 @@ def render_list(videos: list, text: str, out: str, font: str) -> float:
         filt = ";".join(parts) + ";" + "".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[raw];"
         filt += grade_chain("raw", n)
         fd = STYLE["list_end_fade"]
-        filt += f";[b0]fade=t=out:st={total - fd}:d={fd}:color={STYLE['list_end_color']}[f0]"
+        filt += (f";[b0]fade=t=out:st={total - fd}:d={fd}:color={STYLE['list_end_color']}[f0]" if fd
+                 else ";[b0]null[f0]")
         prev = "f0"
         size, lh = STYLE["list_font_size"], STYLE["list_line_height"]
         for i, para in enumerate(paras):
