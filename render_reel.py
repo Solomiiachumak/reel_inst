@@ -64,6 +64,15 @@ STYLE = {
     "seq_last_extra": 1.5,     # с — фінальний пункт стоїть довше
     "fade_in": 0,              # 0 = текст видно з першого кадру
     "fade_out": 0,             # 0 = текст видно до останнього кадру
+    # --- шаблон «список»: кожен пункт — окреме відео (за референсом «ти 10/10») ---
+    "list_font_size": 42,      # px у кадрі 1080x1920
+    "list_line_height": 1.2,
+    "list_line_px": 720,       # максимальна ширина рядка, px (~35 знаків)
+    "list_item_sec": 3.0,      # с на кожен пункт
+    "list_last_sec": 5.0,      # с на фінальний пункт
+    "list_end_fade": 1.2,      # с — в кінці кадр плавно йде в однотонний фон
+    "list_end_color": "0x9a9080",
+    "list_positions": [0.25, 0.37, 0.5, 0.62, 0.72],  # можливі центри тексту по висоті
 }
 
 
@@ -121,21 +130,26 @@ def wrap_line(line: str, font, max_px: float) -> list:
     return units
 
 
-def render_text_png(text: str, font_path: str, out_png: str) -> bool:
+def render_text_png(text: str, font_path: str, out_png: str, size: int | None = None,
+                    line_px_fixed: float | None = None, line_height: float | None = None,
+                    center_y: float | None = None) -> bool:
     """Малює текстовий блок у PNG. Повертає True, якщо текст вмістився без зменшення шрифту."""
     raw_lines = text.strip("\n").split("\n")
     max_w = int(W * STYLE["box_width"])
     max_h = H - STYLE["safe_top"] - STYLE["safe_bottom"]
 
     # Підбираємо найбільший шрифт, з яким текст влазить у безпечну зону
-    size = STYLE["font_size_max"]
+    fixed = size is not None
+    size = size or STYLE["font_size_max"]
+    lh_k = line_height or STYLE["line_height"]
+    cy = STYLE["center_y"] if center_y is None else center_y
     while True:
         font = ImageFont.truetype(font_path, size)
-        line_px = min(font.getlength(STYLE["line_chars"]) * 1.12, max_w)
+        line_px = line_px_fixed or min(font.getlength(STYLE["line_chars"]) * 1.12, max_w)
         lines = []
         for rl in raw_lines:
             lines += wrap_line(rl, font, line_px) if rl.strip() else [""]
-        lh = round(size * STYLE["line_height"])
+        lh = round(size * lh_k)
         gap = round(lh * STYLE["blank_line"])
         ys, y = [], 0
         for l in lines:
@@ -143,11 +157,11 @@ def render_text_png(text: str, font_path: str, out_png: str) -> bool:
             y += lh if l.strip() else gap
         block_h = y
         widths = [font.getlength(l) for l in lines]
-        if (max(widths or [0]) <= max_w and block_h <= max_h) or size <= STYLE["font_size_min"]:
+        if fixed or (max(widths or [0]) <= max_w and block_h <= max_h) or size <= STYLE["font_size_min"]:
             break
         size -= 1
 
-    top = int(H * STYLE["center_y"] - block_h / 2)
+    top = int(H * cy - block_h / 2)
     top = max(STYLE["safe_top"], min(top, H - STYLE["safe_bottom"] - block_h))
 
     def draw_lines(layer, dy, fill):
@@ -191,6 +205,106 @@ def paragraphs(text: str) -> list:
         out.append("\n".join(cur))
     return out
 
+def grain_dims() -> tuple:
+    return int(W / STYLE["grain_size"]) // 2 * 2, int(H / STYLE["grain_size"]) // 2 * 2
+
+
+def prep_chain() -> str:
+    """Будь-яке відео → 1080x1920 (cover), FPS."""
+    return f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS}"
+
+
+def grade_chain(src: str, grain_idx: int) -> str:
+    """Плівка/VHS + зерно. На вході мітка src, на виході [b0]."""
+    wm = STYLE["warm"]
+    return (
+        f"[{src}]scale={STYLE['film_res']}:-2:flags=area,scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['blur']},"
+        f"colorbalance=rs={STYLE['shadow_red']}:bh={STYLE['high_blue']},"
+        f"eq=saturation={STYLE['saturation']},vignette=angle={STYLE['vignette']},"
+        f"curves=all='{STYLE['curve']}',"
+        f"split[a][b];[b]scale={W // 4}:{H // 4}:flags=area,curves=all='0/0 {STYLE['bloom_threshold']}/0 1/1',"
+        f"gblur=sigma={STYLE['bloom_radius'] / 4},scale={W}:{H}:flags=bicubic[gl];"
+        f"[a][gl]blend=all_mode=screen:all_opacity={STYLE['bloom']},"
+        # --- VHS: розмиття по горизонталі, колір «тече», смуги від світла, тепло-коричневий тон ---
+        f"format=yuv444p,gblur=sigma={STYLE['vhs_luma_smear']}:sigmaV=0.6:planes=1,"
+        f"gblur=sigma={STYLE['vhs_chroma_smear']}:sigmaV=1.5:planes=6,"
+        f"chromashift=cbh={STYLE['vhs_chroma_shift']}:crh=-{STYLE['vhs_chroma_shift']},format=gbrp,"
+        f"split[c][d];[d]scale={W // 4}:{H // 4},curves=all='0/0 0.45/0 1/1',"
+        f"gblur=sigma=14:sigmaV=0.8,scale={W}:{H}[sm];"
+        f"[c][sm]blend=all_mode=screen:all_opacity={STYLE['streaks']},"
+        f"colorbalance=rs={wm}:gs={wm / 2}:bs=-{wm}:rm={wm}:gm={wm / 2}:bm=-{wm}:rh={wm}:gh={wm / 3}:bh=-{wm},"
+        f"eq=saturation={STYLE['vhs_saturation']},format=gbrp[bg];"
+        f"[{grain_idx}:v]format=gbrp,noise=alls={STYLE['grain_strength']}:allf=t+u,"
+        f"scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['grain_soft']},format=gbrp[gr];"
+        f"[bg][gr]blend=all_mode=overlay:all_opacity={STYLE['grain_opacity']},format=yuv420p[b0]"
+    )
+
+
+def calm_position(video: str, tmp: str, block_h: int) -> float:
+    """Обирає висоту для тексту там, де кадр найспокійніший (найменше деталей і найменше світла)."""
+    import numpy as np
+    from PIL import ImageFilter
+    png = os.path.join(tmp, "probe.png")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", video,
+                    "-vf", prep_chain() + ",scale=270:480", "-frames:v", "1", png], check=False)
+    if not os.path.exists(png):
+        return 0.5
+    g = Image.open(png).convert("L")
+    edges = np.asarray(g.filter(ImageFilter.FIND_EDGES)).astype(float)
+    lum = np.asarray(g).astype(float)
+    best, best_y = None, 0.5
+    for cy in STYLE["list_positions"]:
+        y0 = int((cy * H - block_h / 2) / 4); y1 = int((cy * H + block_h / 2) / 4)
+        band_e = edges[max(0, y0):y1, 50:220].mean()
+        band_l = lum[max(0, y0):y1, 50:220].mean()
+        score = band_e + max(0, band_l - 150) * 0.5 + abs(cy - 0.5) * 8  # трохи віддаємо перевагу центру
+        if best is None or score < best:
+            best, best_y = score, cy
+    os.remove(png)
+    return best_y
+
+
+def render_list(videos: list, text: str, out: str, font: str) -> float:
+    """Шаблон «список»: пункт N (абзац) іде на відео N, кожен по 3 с, текст стає в спокійне місце кадру."""
+    paras = paragraphs(text)
+    n = len(paras)
+    vids = [videos[i % len(videos)] for i in range(n)]
+    durs = [STYLE["list_item_sec"]] * (n - 1) + [STYLE["list_last_sec"]]
+    total = round(sum(durs), 2)
+    with tempfile.TemporaryDirectory() as tmp:
+        inputs, parts, t = [], [], 0.0
+        for i, v in enumerate(vids):
+            inputs += ["-stream_loop", "-1", "-i", v]
+            parts.append(f"[{i}:v]{prep_chain()},trim=duration={durs[i]},setpts=PTS-STARTPTS[s{i}]")
+        gw, gh = grain_dims()
+        inputs += ["-f", "lavfi", "-i", f"color=c=0x808080:s={gw}x{gh}:r={FPS}"]
+        filt = ";".join(parts) + ";" + "".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[raw];"
+        filt += grade_chain("raw", n)
+        fd = STYLE["list_end_fade"]
+        filt += f";[b0]fade=t=out:st={total - fd}:d={fd}:color={STYLE['list_end_color']}[f0]"
+        prev = "f0"
+        size, lh = STYLE["list_font_size"], STYLE["list_line_height"]
+        for i, para in enumerate(paras):
+            # висота блоку, щоб правильно оцінити місце
+            font_obj = ImageFont.truetype(font, size)
+            nlines = sum(len(wrap_line(l, font_obj, STYLE["list_line_px"])) for l in para.split("\n"))
+            cy = calm_position(vids[i], tmp, int(nlines * size * lh))
+            png = os.path.join(tmp, f"l{i}.png")
+            render_text_png(para, font, png, size=size, line_px_fixed=STYLE["list_line_px"], line_height=lh, center_y=cy)
+            a = round(t, 3); b = round(t + durs[i], 3); t += durs[i]
+            inputs += ["-loop", "1", "-framerate", str(FPS), "-i", png]
+            k = n + 1 + i
+            filt += f";[{k}:v]format=rgba[t{i}];[{prev}][t{i}]overlay=0:0:format=auto:enable='between(t,{a},{b})'[o{i}]"
+            prev = f"o{i}"
+        filt += f";[{prev}]format=yuv420p[v]"
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", *inputs,
+               "-filter_complex", filt, "-map", "[v]", "-t", str(total), "-an",
+               "-c:v", "libx264", "-preset", "medium", "-crf", "21",
+               "-maxrate", STYLE["max_bitrate"], "-bufsize", "8M",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
+        subprocess.run(cmd, check=True)
+    return total
+
 
 def render(video: str, text: str, out: str, grain: str, font: str,
            duration: float | None, mode: str = "auto") -> float:
@@ -225,31 +339,8 @@ def render(video: str, text: str, out: str, grain: str, font: str,
             fades.append(f"fade=t=out:st={max(0.0, dur - STYLE['fade_out'])}:d={STYLE['fade_out']}:alpha=1")
         txt_chain = ",".join(["format=rgba"] + fades)
 
-        wm = STYLE["warm"]
-        gw = int(W / STYLE["grain_size"]) // 2 * 2
-        gh = int(H / STYLE["grain_size"]) // 2 * 2
-        filt = (
-            f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},"
-            f"scale={STYLE['film_res']}:-2:flags=area,scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['blur']},"
-            f"colorbalance=rs={STYLE['shadow_red']}:bh={STYLE['high_blue']},"
-            f"eq=saturation={STYLE['saturation']},vignette=angle={STYLE['vignette']},"
-            f"curves=all='{STYLE['curve']}',"
-            f"split[a][b];[b]scale={W // 4}:{H // 4}:flags=area,curves=all='0/0 {STYLE['bloom_threshold']}/0 1/1',"
-            f"gblur=sigma={STYLE['bloom_radius'] / 4},scale={W}:{H}:flags=bicubic[gl];"
-            f"[a][gl]blend=all_mode=screen:all_opacity={STYLE['bloom']},"
-            # --- VHS: розмиття по горизонталі, колір «тече», смуги від світла, тепло-коричневий тон ---
-            f"format=yuv444p,gblur=sigma={STYLE['vhs_luma_smear']}:sigmaV=0.6:planes=1,"
-            f"gblur=sigma={STYLE['vhs_chroma_smear']}:sigmaV=1.5:planes=6,"
-            f"chromashift=cbh={STYLE['vhs_chroma_shift']}:crh=-{STYLE['vhs_chroma_shift']},format=gbrp,"
-            f"split[c][d];[d]scale={W // 4}:{H // 4},curves=all='0/0 0.45/0 1/1',"
-            f"gblur=sigma=14:sigmaV=0.8,scale={W}:{H}[sm];"
-            f"[c][sm]blend=all_mode=screen:all_opacity={STYLE['streaks']},"
-            f"colorbalance=rs={wm}:gs={wm / 2}:bs=-{wm}:rm={wm}:gm={wm / 2}:bm=-{wm}:rh={wm}:gh={wm / 3}:bh=-{wm},"
-            f"eq=saturation={STYLE['vhs_saturation']},format=gbrp[bg];"
-            f"[1:v]format=gbrp,noise=alls={STYLE['grain_strength']}:allf=t+u,"
-            f"scale={W}:{H}:flags=bicubic,gblur=sigma={STYLE['grain_soft']},format=gbrp[gr];"
-            f"[bg][gr]blend=all_mode=overlay:all_opacity={STYLE['grain_opacity']},format=yuv420p[b0]"
-        )
+        gw, gh = grain_dims()
+        filt = f"[0:v]{prep_chain()}[raw];" + grade_chain("raw", 1)
         inputs = ["-stream_loop", "-1", "-i", video,
                   "-f", "lavfi", "-i", f"color=c=0x808080:s={gw}x{gh}:r={FPS}"]
         prev = "b0"
