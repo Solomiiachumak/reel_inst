@@ -21,7 +21,7 @@ import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from render_reel import render  # noqa: E402
+from render_reel import render, render_list  # noqa: E402
 PEXELS_SEARCH = "https://api.pexels.com/videos/search"
 
 
@@ -129,15 +129,22 @@ def main() -> None:
         bg = a.video
         meta.update({"pexels_id": "", "author": "local test"})
     elif drive_video:
-        # відео з бібліотеки на Google Drive (файл має бути доступний «за посиланням»)
-        fid = drive_id(drive_video)
-        bg = os.path.join(os.path.dirname(os.path.abspath(a.out)), "bg.mp4")
-        download(f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t", bg)
-        with open(bg, "rb") as fh:
-            head = fh.read(512).lower()
-        if b"<html" in head or b"<!doctype" in head:
-            sys.exit("Google Drive не віддав відео: відкрийте доступ до файлу/папки «Усі, хто має посилання»")
-        meta.update({"video_id": fid, "source": "drive"})
+        # відео з бібліотеки на Google Drive (файл має бути доступний «за посиланням»).
+        # Кілька ID/посилань через кому → шаблон «список»: пункт 1 на відео 1, пункт 2 на відео 2...
+        import re
+        items = [x for x in re.split(r"[,;\s]+", drive_video) if x]
+        fids = [drive_id(x) for x in items]
+        bgs = []
+        for k, fid in enumerate(fids):
+            path = os.path.join(os.path.dirname(os.path.abspath(a.out)), f"bg{k}.mp4")
+            download(f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t", path)
+            with open(path, "rb") as fh:
+                head = fh.read(512).lower()
+            if b"<html" in head or b"<!doctype" in head:
+                sys.exit(f"Google Drive не віддав відео {fid}: відкрийте доступ до файлу/папки «Усі, хто має посилання»")
+            bgs.append(path)
+        bg = bgs[0]
+        meta.update({"video_id": ",".join(fids), "source": "drive"})
     else:
         key = os.environ["PEXELS_API_KEY"]
         video, f = pick_video(keywords, exclude, key)
@@ -151,11 +158,15 @@ def main() -> None:
         })
 
     mode = os.environ.get("REEL_MODE", "").strip() or "auto"
-    dur = render(bg, text, a.out, "", font_path(), None, mode)  # зерно генерується в render_reel
+    if drive_video and not a.video and len(bgs) > 1:
+        dur = render_list(bgs, text, a.out, font_path())
+    else:
+        dur = render(bg, text, a.out, "", font_path(), None, mode)  # зерно генерується в render_reel
     meta["duration"] = dur
 
-    if not a.video and os.path.exists(bg) and bg.endswith("bg.mp4"):
-        os.remove(bg)  # у артефакт кладемо лише готовий рілс
+    for f in (bgs if (drive_video and not a.video) else [bg] if bg.endswith("bg.mp4") else []):
+        if os.path.exists(f):
+            os.remove(f)  # у артефакт кладемо лише готовий рілс
     with open(a.meta, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, ensure_ascii=False)
     print("Готово:", a.out, meta)
