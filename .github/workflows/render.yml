@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: ""
+      template:
+        description: "Шаблон: порожньо — звичайний, «спліт» — екран навпіл"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   render:
@@ -52,6 +57,7 @@ jobs:
           REEL_KEYWORDS: ${{ inputs.keywords }}
           REEL_VIDEO: ${{ inputs.video }}
           REEL_EXCLUDE: ${{ inputs.exclude }}
+          REEL_TEMPLATE: ${{ inputs.template }}
         run: python pipeline.py --out out/reel.mp4 --meta out/meta.json
 
       - uses: actions/upload-artifact@v4
