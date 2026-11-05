@@ -73,6 +73,16 @@ STYLE = {
     "list_end_fade": 0,        # с — затухання в кінці (0 = без затухання)
     "list_end_color": "0x9a9080",
     "list_positions": [0.25, 0.37, 0.5, 0.62, 0.72],  # можливі центри тексту по висоті
+    # --- шаблон «спліт»: екран навпіл, верх — до «але», низ — від «але» ---
+    "split_font_size": 64,     # px — стартовий розмір (зменшується, якщо текст не вміщається)
+    "split_font_min": 40,      # px — нижче не зменшуємо
+    "split_line_height": 1.15,
+    "split_line_px": 900,      # максимальна ширина рядка, px
+    "split_darken": 0.25,      # притемнення відео 0..1
+    "split_words_per_sec": 2.5,
+    "split_min": 3.5,          # с — мінімум на кадр
+    "split_pad": 1.5,          # с — запас на кадр
+    "split_last_extra": 1.5,   # с — останній кадр стоїть довше (без затухання)
 }
 
 
@@ -295,6 +305,107 @@ def render_list(videos: list, text: str, out: str, font: str) -> float:
             a = round(t, 3); b = round(t + durs[i], 3); t += durs[i]
             inputs += ["-loop", "1", "-framerate", str(FPS), "-i", png]
             k = n + 1 + i
+            filt += f";[{k}:v]format=rgba[t{i}];[{prev}][t{i}]overlay=0:0:format=auto:enable='between(t,{a},{b})'[o{i}]"
+            prev = f"o{i}"
+        filt += f";[{prev}]format=yuv420p[v]"
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", *inputs,
+               "-filter_complex", filt, "-map", "[v]", "-t", str(total), "-an",
+               "-c:v", "libx264", "-preset", "medium", "-crf", "21",
+               "-maxrate", STYLE["max_bitrate"], "-bufsize", "8M",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
+        subprocess.run(cmd, check=True)
+    return total
+
+
+# ---------------- шаблон «спліт» ----------------
+
+def split_paragraph(para: str) -> tuple:
+    """Ділить абзац на (верх, низ) по першому рядку, що починається з «але».
+    Якщо «але» немає — верх: перша половина рядків, низ: решта."""
+    lines = [l for l in para.split("\n") if l.strip()]
+    for k, l in enumerate(lines):
+        first = l.strip().lower().split()[0].strip(",.:;—-–") if l.strip() else ""
+        if first == "але" and k > 0:
+            return "\n".join(lines[:k]), "\n".join(lines[k:])
+    half = (len(lines) + 1) // 2
+    return "\n".join(lines[:half]), "\n".join(lines[half:])
+
+
+def split_clean(text: str) -> str:
+    """Великі літери + заміна символів, яких немає в шрифті Neutral Face."""
+    for a, b in {"«": '"', "»": '"', "„": '"', "“": '"', "”": '"', "’": "'", "ʼ": "'", "…": "..."}.items():
+        text = text.replace(a, b)
+    return text.upper()
+
+
+def render_split_png(top: str, bottom: str, font_path: str, out_png: str) -> None:
+    """Малює кадр 1080x1920: текст верхньої частини по центру верхньої половини, нижньої — нижньої."""
+    half = H // 2
+    # межі для тексту в кожній половині (з урахуванням інтерфейсу Instagram)
+    zones = [(STYLE["safe_top"], half - 60), (half + 60, H - STYLE["safe_bottom"])]
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    for part, (z0, z1), cy in ((top, zones[0], half // 2), (bottom, zones[1], half + half // 2)):
+        part = split_clean(part).strip()
+        if not part:
+            continue
+        size = STYLE["split_font_size"]
+        while True:
+            font = ImageFont.truetype(font_path, size)
+            lines = []
+            for rl in part.split("\n"):
+                lines += wrap_line(rl, font, STYLE["split_line_px"])
+            lh = round(size * STYLE["split_line_height"])
+            block_h = lh * len(lines)
+            if block_h <= z1 - z0 or size <= STYLE["split_font_min"]:
+                break
+            size -= 2
+        y = int(cy - block_h / 2)
+        y = max(z0, min(y, z1 - block_h))
+        for line in lines:
+            d.text(((W - font.getlength(line)) / 2, y), line, font=font, fill=STYLE["text_color"])
+            y += lh
+    img.save(out_png)
+
+
+def render_split(videos: list, text: str, out: str, font: str) -> float:
+    """Шаблон «спліт»: кожен абзац — окремий кадр на наступному відео зі списку.
+    Відео (одне й те саме) заповнює верхню і нижню половини, текст до «але» — вгорі, від «але» — внизу."""
+    paras = paragraphs(text)
+    n = len(paras)
+    vids = [videos[i % len(videos)] for i in range(n)]
+    durs = []
+    for i, para in enumerate(paras):
+        dd = max(STYLE["split_min"], len(para.split()) / STYLE["split_words_per_sec"] + STYLE["split_pad"])
+        if i == n - 1:
+            dd += STYLE["split_last_extra"]
+        durs.append(round(dd, 2))
+    total = round(sum(durs), 2)
+    hh = H // 2
+    with tempfile.TemporaryDirectory() as tmp:
+        inputs, parts = [], []
+        for i, v in enumerate(vids):
+            inputs += ["-stream_loop", "-1", "-i", v]
+            # відео заповнює половину екрана з обрізкою; обидві половини — те саме відео
+            parts.append(
+                f"[{i}:v]scale={W}:{hh}:force_original_aspect_ratio=increase,crop={W}:{hh},setsar=1,fps={FPS},"
+                f"trim=duration={durs[i]},setpts=PTS-STARTPTS,split[u{i}][d{i}];[u{i}][d{i}]vstack[s{i}]"
+            )
+        gw, gh = grain_dims()
+        inputs += ["-f", "lavfi", "-i", f"color=c=0x808080:s={gw}x{gh}:r={FPS}"]
+        filt = ";".join(parts) + ";" + "".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[raw];"
+        filt += grade_chain("raw", n)
+        k_d = round(1 - STYLE["split_darken"], 3)
+        filt += f";[b0]colorchannelmixer=rr={k_d}:gg={k_d}:bb={k_d}[f0]"
+        prev, t = "f0", 0.0
+        for i, para in enumerate(paras):
+            top, bottom = split_paragraph(para)
+            png = os.path.join(tmp, f"s{i}.png")
+            render_split_png(top, bottom, font, png)
+            a = round(t, 3); b = round(t + durs[i], 3); t += durs[i]
+            inputs += ["-loop", "1", "-framerate", str(FPS), "-i", png]
+            k = n + 1 + i
+            # текст накладається після VHS-обробки — тому лишається різким
             filt += f";[{k}:v]format=rgba[t{i}];[{prev}][t{i}]overlay=0:0:format=auto:enable='between(t,{a},{b})'[o{i}]"
             prev = f"o{i}"
         filt += f";[{prev}]format=yuv420p[v]"

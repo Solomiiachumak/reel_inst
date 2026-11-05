@@ -21,7 +21,7 @@ import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from render_reel import render, render_list  # noqa: E402
+from render_reel import render, render_list, render_split  # noqa: E402
 PEXELS_SEARCH = "https://api.pexels.com/videos/search"
 
 
@@ -75,6 +75,15 @@ def font_path() -> str:
         if os.path.exists(c):
             return c
     raise SystemExit("Не знайдено шрифт Roboto-Medium")
+
+
+def split_font_path() -> str:
+    """Neutral Face для шаблону «спліт»: файл у папці fonts/ репозиторію."""
+    for name in ("NeutralFace.otf", "NeutralFace-Bold.otf"):
+        c = os.path.join(HERE, "fonts", name)
+        if os.path.exists(c):
+            return c
+    raise SystemExit("Не знайдено шрифт fonts/NeutralFace.otf — завантажте його в папку fonts репозиторію")
 
 
 def grain_path() -> str:
@@ -158,7 +167,11 @@ def main() -> None:
         })
 
     mode = os.environ.get("REEL_MODE", "").strip() or "auto"
-    if drive_video and not a.video and len(bgs) > 1:
+    template = os.environ.get("REEL_TEMPLATE", "").strip().lower()
+    if template == "спліт":
+        dur = render_split(bgs if (drive_video and not a.video) else [bg], text, a.out, split_font_path())
+        meta["template"] = "спліт"
+    elif drive_video and not a.video and len(bgs) > 1:
         dur = render_list(bgs, text, a.out, font_path())
     else:
         dur = render(bg, text, a.out, "", font_path(), None, mode)  # зерно генерується в render_reel
