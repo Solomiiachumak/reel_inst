@@ -79,11 +79,11 @@ def font_path() -> str:
 
 def split_font_path() -> str:
     """Neutral Face для шаблону «спліт»: файл у папці fonts/ репозиторію."""
-    for name in ("NeutralFace.otf", "NeutralFace-Bold.otf"):
+    for name in ("NeutralFace-Bold.otf",):
         c = os.path.join(HERE, "fonts", name)
         if os.path.exists(c):
             return c
-    raise SystemExit("Не знайдено шрифт fonts/NeutralFace.otf — завантажте його в папку fonts репозиторію")
+    raise SystemExit("Не знайдено шрифт fonts/NeutralFace-Bold.otf — завантажте його в папку fonts репозиторію")
 
 
 def grain_path() -> str:
